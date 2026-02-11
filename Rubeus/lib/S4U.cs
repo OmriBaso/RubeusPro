@@ -285,6 +285,23 @@ namespace Rubeus
                         // now build the final KRB-CRED structure with one or more alternate snames
                         KRB_CRED cred = new KRB_CRED();
 
+                        // Check if the hostname part (index 1) contains a port (like :1433) and clean it
+                        if (rep2.ticket.sname.name_string.Count > 1 && rep2.ticket.sname.name_string[1].Contains(":"))
+                        {
+                            string rawHostname = rep2.ticket.sname.name_string[1];
+                            string cleanHostname = rawHostname.Split(':')[0];
+                            rep2.ticket.sname.name_string[1] = cleanHostname;
+
+
+                            if (encRepPart2.sname.name_string.Count > 1)
+                            {
+                                encRepPart2.sname.name_string[1] = cleanHostname;
+                            }
+                            Console.WriteLine("[!] Cleaned The port from hostname: {0} -> {1}", rawHostname, cleanHostname);
+
+
+                            serverName = cleanHostname;
+                        }
                         // since we want an alternate sname, first substitute it into the ticket structure
                         rep2.ticket.sname.name_string[0] = altSname;
 
