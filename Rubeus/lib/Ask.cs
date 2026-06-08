@@ -552,7 +552,10 @@ namespace Rubeus {
             {
                 if (requestEType == Interop.KERB_ETYPE.subkey_keymaterial)
                 {
-                    Console.WriteLine("[*] Requesting default etypes (RC4_HMAC, AES[128/256]_CTS_HMAC_SHA1) for the service ticket", requestEType);
+                    if (paEType == Interop.KERB_ETYPE.aes256_cts_hmac_sha1 || paEType == Interop.KERB_ETYPE.aes128_cts_hmac_sha1)
+                        Console.WriteLine("[*] Requesting default etypes (AES256, AES128) for the service ticket");
+                    else
+                        Console.WriteLine("[*] Requesting default etypes (AES256, AES128, RC4_HMAC) for the service ticket");
                 }
                 else
                 {
