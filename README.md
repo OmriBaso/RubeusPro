@@ -8,7 +8,9 @@ RubeusPro is a fork of [Rubeus](https://github.com/GhostPack/Rubeus) with additi
 
 RubeusPro adds the following capabilities on top of the original Rubeus:
 
-**SPNless S4U with SAMR Password Change** - The `/spnless` flag on the `s4u` command enables constrained delegation abuse without requiring an SPN on the target account. This works by temporarily changing the target account's password via MS-SAMR over an authenticated SMB3 session with AES-128-CCM transport encryption, performing the S4U exchange, and optionally reverting the password afterward.
+**SPNless S4U with SAMR Password Change** - The `/spnless` flag on the `s4u` command enables constrained delegation abuse without requiring an SPN on the target account. This works by temporarily changing the target account's password via MS-SAMR over an authenticated SMB3 session with AES-128-CCM transport encryption, performing the S4U exchange, and optionally reverting the password afterward. Supports both same-domain and cross-domain RBCD scenarios via `/targetdomain` and `/targetdc`.
+
+**Cross-Domain RBCD SPNless** - The SPNless flow fully supports cross-domain resource-based constrained delegation. When `/targetdomain` and `/targetdc` are specified alongside `/spnless`, the password change is performed against the local domain DC via SAMR, and the S4U2Self + S4U2Proxy exchanges are routed through the appropriate cross-domain referral path to obtain a service ticket in the target domain.
 
 **TGS-REQ Encryption Type Fix** - When authenticating with AES keys (`/aes128` or `/aes256`), TGS-REQ messages no longer include RC4 in the requested encryption types. This prevents `KDC_ERR_ETYPE_NOTSUPP` errors in environments where RC4 has been disabled (Windows Server 2025+, or domains with RC4 explicitly blocked).
 
@@ -311,9 +313,13 @@ Full usage:
 
     Rubeus.exe s4u </ticket:BASE64 | /ticket:FILE.KIRBI> /impersonateuser:USER /msdsspn:SERVICE/SERVER [/spnless] [/revertpass] [/bypasshistory] [/altservice:SERVICE] [/dc:DOMAIN_CONTROLLER] [/outfile:FILENAME] [/ptt] [/nowrap] [/opsec] [/self]
 
-Cross-domain:
+Cross-domain (including RBCD SPNless):
 
     Rubeus.exe s4u /user:USER </rc4:HASH | /aes256:HASH> /impersonateuser:USER /msdsspn:SERVICE/SERVER /targetdomain:DOMAIN.LOCAL /targetdc:DC.DOMAIN.LOCAL [/spnless] [/revertpass] [/bypasshistory] [/altservice:SERVICE] [/dc:DOMAIN_CONTROLLER] [/nowrap] [/self] [/nopac]
+
+Cross-domain RBCD SPNless example:
+
+    Rubeus.exe s4u /user:attacker /rc4:HASH /impersonateuser:administrator /msdsspn:cifs/target.child.domain.local /targetdomain:CHILD.DOMAIN.LOCAL /targetdc:DC2.CHILD.DOMAIN.LOCAL /spnless /dc:DC1.DOMAIN.LOCAL /revertpass /bypasshistory
 
 
 ## Ticket Forgery
