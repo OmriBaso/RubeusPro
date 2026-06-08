@@ -96,6 +96,14 @@ When used with `/revertpass`, flush the password history by cycling through 24 d
 
 Note: `/bypasshistory` cannot be used without `/revertpass`. The history flush sends 24 consecutive password changes through SAMR, which takes a few seconds. If the domain also enforces a minimum password age (default: 1 day), the flush will fail with `STATUS_PASSWORD_RESTRICTION` since each intermediate change violates the minimum age. In practice, most environments either don't enforce minimum password age or the attacking account is exempt.
 
+#### Cross-Domain RBCD SPNless
+
+The `/spnless` flow fully supports cross-domain resource-based constrained delegation. When `/targetdomain` and `/targetdc` are specified alongside `/spnless`, the password change is performed against the local domain DC via SAMR, and the S4U2Self + S4U2Proxy exchanges follow the cross-domain referral path to obtain a service ticket in the target domain.
+
+    Rubeus.exe s4u /user:attacker /rc4:HASH /impersonateuser:administrator /msdsspn:cifs/target.child.domain.local /targetdomain:CHILD.DOMAIN.LOCAL /targetdc:DC2.CHILD.DOMAIN.LOCAL /spnless /dc:DC1.DOMAIN.LOCAL /revertpass /bypasshistory
+
+This requires that the attacker account in the local domain has been granted delegation rights (via `msDS-AllowedToActOnBehalfOfOtherIdentity`) on the target resource in the foreign domain. The `/dc` flag points to the local domain controller (used for TGT and SAMR), while `/targetdc` points to the domain controller in the target domain (used for the cross-domain S4U2Proxy TGS-REQ).
+
 ### TGS Encryption Type Changes
 
 When using AES keys (`/aes128` or `/aes256`) for authentication, TGS-REQ messages now only request AES encryption types and no longer include RC4. This applies to all TGS request paths including S4U2Self, S4U2Proxy, and standard service ticket requests.
