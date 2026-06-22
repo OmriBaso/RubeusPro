@@ -80,6 +80,7 @@
     <Compile Include="Commands\Asreproast.cs" />
     <Compile Include="Commands\Brute.cs" />
     <Compile Include="Commands\Changepw.cs" />
+    <Compile Include="Commands\Samrchangepw.cs" />
     <Compile Include="Commands\Createnetonly.cs" />
     <Compile Include="Commands\Kirbi.cs" />
     <Compile Include="Commands\Logonsession.cs" />
@@ -108,6 +109,12 @@
     <Compile Include="Domain\CommandCollection.cs" />
     <Compile Include="Domain\Info.cs" />
     <Compile Include="lib\Ask.cs" />
+    <Compile Include="lib\Smb\NtlmAuth.cs" />
+    <Compile Include="lib\Smb\Smb2Client.cs" />
+    <Compile Include="lib\Smb\Smb3Crypto.cs" />
+    <Compile Include="lib\Smb\DceRpc.cs" />
+    <Compile Include="lib\Smb\SamrRpc.cs" />
+    <Compile Include="lib\Smb\SamrPasswordChange.cs" />
     <Compile Include="lib\Bruteforcer.cs" />
     <Compile Include="lib\ConsoleTable.cs" />
     <Compile Include="lib\Crypto.cs" />

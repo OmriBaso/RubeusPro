@@ -21,6 +21,24 @@ namespace Rubeus
 
     public class TGS_REQ
     {
+        private static bool IsAesEtype(Interop.KERB_ETYPE etype)
+        {
+            return etype == Interop.KERB_ETYPE.aes256_cts_hmac_sha1
+                || etype == Interop.KERB_ETYPE.aes128_cts_hmac_sha1;
+        }
+
+        private static void AddDefaultEtypes(KDCReqBody body, Interop.KERB_ETYPE paEType, bool includeExpired = true)
+        {
+            body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
+            body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
+            if (!IsAesEtype(paEType))
+            {
+                body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
+                if (includeExpired)
+                    body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac_exp);
+            }
+        }
+
         public static byte[] NewTGSReq(string userName, string domain, string sname, Ticket providedTicket, byte[] clientKey, Interop.KERB_ETYPE paEType, Interop.KERB_ETYPE requestEType = Interop.KERB_ETYPE.subkey_keymaterial, bool renew = false, string s4uUser = "", bool enterprise = false, bool roast = false, bool opsec = false, bool unconstrained = false, KRB_CRED tgs = null, string targetDomain = "", bool u2u = false, bool keyList = false, bool dmsa = false, string serviceType = "principal")
         {
             TGS_REQ req;
@@ -72,21 +90,14 @@ namespace Rubeus
             // add in our encryption types
             if (requestEType == Interop.KERB_ETYPE.subkey_keymaterial)
             {
-                // normal behavior
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac_exp);
-                //req.req_body.etypes.Add(Interop.KERB_ETYPE.des_cbc_crc);
+                // default: AES always, RC4 only when the authenticating key is RC4
+                AddDefaultEtypes(req.req_body, paEType);
             }
-            // real traffic have these etypes except when requesting a TGT, then only 
             else if ((opsec) && (parts.Length > 1) && (parts[0] != "krbtgt"))
             {
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac_exp);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.old_exp);
+                AddDefaultEtypes(req.req_body, paEType);
+                if (!IsAesEtype(paEType))
+                    req.req_body.etypes.Add(Interop.KERB_ETYPE.old_exp);
             }
             else
             {
@@ -312,16 +323,10 @@ namespace Rubeus
             // add in our encryption types
             if (requestEType == Interop.KERB_ETYPE.subkey_keymaterial)
             {
-                // normal behavior
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
-                req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac_exp);
-                //req.req_body.etypes.Add(Interop.KERB_ETYPE.des_cbc_crc);
+                AddDefaultEtypes(req.req_body, paEType);
             }
             else
             {
-                // add in the supported etype specified
                 req.req_body.etypes.Add(requestEType);
             }
 
@@ -374,26 +379,18 @@ namespace Rubeus
             // add in our encryption types
             if (requestEType == Interop.KERB_ETYPE.subkey_keymaterial)
             {
-                // normal behavior
                 if (U2U_ENC == true)
                 {
-                    req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
-                    req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
+                    // U2U needs the etype matching the TGT session key
+                    req.req_body.etypes.Add(paEType);
                 }
-                else {
-
-                    req.req_body.etypes.Add(Interop.KERB_ETYPE.aes256_cts_hmac_sha1);
-                    req.req_body.etypes.Add(Interop.KERB_ETYPE.aes128_cts_hmac_sha1);
-                    req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac);
-                    req.req_body.etypes.Add(Interop.KERB_ETYPE.rc4_hmac_exp);
-
+                else
+                {
+                    AddDefaultEtypes(req.req_body, paEType);
                 }
-
-         
             }
             else
             {
-                // add in the supported etype specified
                 req.req_body.etypes.Add(requestEType);
             }
 
